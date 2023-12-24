@@ -1,0 +1,1439 @@
+---
+title: "Normalization Functions"
+author: "Margarida Goncalves"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+## Important Libraries
+```{r}
+library(BiocGenerics)
+library(BiocManager)
+library(DESeq2)
+library(ggplot2)
+library(readr)
+library(gprofiler2)
+library(clustifyr)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(noisyr)
+library(rafalib)
+library(affy)
+library(affydata)
+library(vsn)
+library(edgeR)
+library(NormalyzerDE)
+library(marray) # cDNA microarray data
+library(RNOmni)
+library(ProteoMM)
+library(limma)
+library(RUVSeq)
+library(EDASeq)
+library(precision.seq)
+library(DANA)
+library(sva)
+library(Biobase)
+```
+
+
+
+# expression.matrix
+
+It is a matrix each genes described in the rows and the in the columns we have the samples
+
+```{r, echo=FALSE}
+load('data.test.RData')
+head(data.test)
+
+expression.matrix <- data.test
+
+expression.matrix[ , 1:6] <- apply(expression.matrix[ , 1:6], 2,            # Specify own function within apply
+                    function(x) as.numeric(as.character(x)))
+head(expression.matrix)
+```
+
+```{r}
+expression.matrix<- noisyr::remove_noise_from_matrix(
+  expression.matrix = expression.matrix,
+  noise.thresholds = c(0,0,0,0,0,0))
+
+str(expression.matrix)
+
+expression.matrix <- noisyr::cast_matrix_to_numeric(expression.matrix)
+```
+
+# metadata
+
+Were we only want to study the Control vs the Knockout
+So, the groups of the design will be the groups presented in metadata$group
+```{r, echo=FALSE}
+
+metadata <- data.frame(id = colnames(expression.matrix),
+                         group = c("Control", "Control", "Control", "Knockout", "Knockout","Knockout"))
+
+metadata
+
+groups <- c(metadata$group) # it will be necessary for the design that is detailed in the normalization functions
+
+design <- model.matrix(~ 0 + groups)
+```
+
+
+
+## Quantile Normalization
+
+```{r, echo=FALSE}
+DE_edgeR = function(expression.matrix, metadata, design){
+
+  
+  # quantile normalise
+  expression.matrix.normalised <-
+    preprocessCore::normalize.quantiles(expression.matrix)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#EEE8CD", "#EE3B3B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res)
+}
+
+results.denoised <- DE_edgeR(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+  
+```
+
+## Quantile Normalization with limma
+
+```{r, echo=FALSE}
+DE_edgeR_Quantile_limma = function(expression.matrix, metadata,design){
+  
+  # quantile normalise
+  expression.matrix.normalised <-
+    limma::normalizeQuantiles(expression.matrix, ties = TRUE)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#F0FFF0", "#FF8C00")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res)
+}
+
+results.denoised <- DE_edgeR_Quantile_limma(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+  
+```
+
+Quantile normalization Manual
+
+```{r, echo=FALSE}
+norm.QN <- function(expression.matrix, filter = FALSE) {
+
+  if (filter == TRUE) {
+    expression.matrix <- log2(expression.matrix + 1)
+    expression.matrix <- expression.matrix[rowMeans(expression.matrix) > 2, ]
+  } else {
+    expression.matrix <- log2(expression.matrix + 1)
+  }
+  dat.log.normed <- preprocessCore::normalize.quantiles(as.matrix(expression.matrix))
+  dat.normed <- 2^dat.log.normed - 1
+  colnames(dat.normed) <- colnames(expression.matrix)
+  rownames(dat.normed) <- rownames(expression.matrix)
+
+# process using edgeR
+  expression.matrix.for.de <- round(dat.normed)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#EEE8CD", "#EE3B3B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res)
+}
+
+results.denoised <- norm.QN(expression.matrix)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+```
+
+
+
+## Robust Quantile normalization
+
+```{r, echo=FALSE}
+DE_edgeR_Robust_Quantile = function(expression.matrix, metadata,design){
+  
+  # robust quantile normalise
+  expression.matrix.normalised <-
+    preprocessCore::normalize.quantiles.robust(expression.matrix)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("navyblue", "slateblue1")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res)
+  
+}
+
+
+results.denoised <- DE_edgeR_Robust_Quantile(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+
+
+## VSN normalization
+
+
+
+```{r, echo=FALSE}
+DE_edgeR_vsn = function(expression.matrix, metadata,design){
+  
+  # apply a filter because vsn does not behave well with zeros in the matrix
+  
+  keep = rowSums(expression.matrix) >= 10
+  expression.matrix1<- expression.matrix[keep,]
+
+
+  # vsn normalise
+  expression.matrix.normalised <- limma::normalizeVSN(expression.matrix1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix1)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix1)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("navajowhite4", "lightsalmon1")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_vsn(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+## Median Normalization
+
+
+```{r, echo=FALSE}
+DE_edgeR_median = function(expression.matrix, metadata,design){
+  
+  # apply a filter
+  
+  keep = rowSums(expression.matrix) >= 10
+  expression.matrix1<- expression.matrix[keep,]
+
+
+  # median normalise
+  expression.matrix.normalised <- limma::normalizeMedianValues(expression.matrix1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix1)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix1)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("mintcream", "hotpink4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_median(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+Método Manual
+
+```{r, echo=FALSE}
+norm.med <- function(expression.matrix, groups,design) {
+  
+  dat.DGE <- DGEList(counts = matrix(expression.matrix, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix))
+  m.factor <- apply(dat.DGE$counts, 2, function(x) median(x[x != 0]))
+  scaling.factor <- m.factor/1e6
+  dat.normed <- t(t(expression.matrix)/scaling.factor)
+  
+  
+  # median normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("mintcream", "hotpink4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- norm.med(expression.matrix,groups,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+  
+```
+
+
+
+## Median absolute Normalization
+
+
+```{r, echo=FALSE}
+DE_edgeR_median_abs = function(expression.matrix, metadata,design){
+  
+  # apply a filter
+  
+  keep = rowSums(expression.matrix) >= 10
+  expression.matrix1<- expression.matrix[keep,]
+
+
+  # median normalise
+  expression.matrix.normalised <- limma::normalizeMedianAbsValues(expression.matrix1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix1)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix1)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("snow3", "springgreen4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_median_abs(expression.matrix,metadata,design)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+
+## TMM 
+
+```{r, echo=FALSE}
+DE_edgeR_TMM = function(expression.matrix, metadata,design){
+
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix*edgeR::normLibSizes(expression.matrix, logratioTrim = .3, sumTrim = 0.05) ## method = "TMM"
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "hotpink3")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_TMM(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+Método Manual:
+
+```{r, echo=FALSE}
+norm.TMM <- function(expression.matrix, groups,design) {
+
+  dat.DGE <- DGEList(counts = matrix(expression.matrix, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix))
+  d <- calcNormFactors(dat.DGE, method = "TMM")
+  #dat.normed <- d$samples$norm.factors * expression.matrix 
+  dat.normed <- t(t(expression.matrix)/d$samples$norm.factors)
+  
+  
+# process using edgeR
+  expression.matrix.for.de <- round(dat.normed)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "hotpink3")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.TMM(expression.matrix,groups,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+```
+
+
+
+
+
+## TMMwsp Normalization
+
+```{r, echo=FALSE}
+DE_edgeR_TMM_wsp = function(expression.matrix, metadata,design){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix*edgeR::normLibSizes(expression.matrix, method = "TMMwsp") 
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#CD8162")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_TMM_wsp(expression.matrix,metadata,design)
+
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+
+## RLE Normalization
+
+
+```{r, echo=FALSE}
+DE_edgeR_RLE = function(expression.matrix, metadata,design){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix*edgeR::normLibSizes(expression.matrix, method = "RLE")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#87CEFA")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_RLE(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+
+## Upper quartile normalization
+
+```{r, echo=FALSE}
+DE_edgeR_upper_Quartile = function(expression.matrix, metadata,design){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix*edgeR::normLibSizes(round(expression.matrix), method = "upperquartile")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+ 
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#8B4789")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_upper_Quartile(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+Upper Quantile Manual
+
+```{r, echo=FALSE}
+norm.UQ <- function(expression.matrix, groups,design) {
+  
+  dat.DGE <- DGEList(counts = matrix(expression.matrix, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix))
+  q.factor <- apply(dat.DGE$counts, 2, function(x) quantile(x[x != 0], probs = 0.75))
+  scaling.factor <- q.factor/1e6
+  dat.normed <- t(t(expression.matrix)/scaling.factor)
+  
+ 
+  # UQ normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#6959CD")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.UQ(expression.matrix,groups,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+
+## Min-max normalization
+
+
+```{r, echo=FALSE}
+DE_edgeR_Min_Max = function(expression.matrix, metadata,design){
+
+  #Normalization
+  
+  expression.matrix.normalised  <- expression.matrix
+  
+#for(i in 1:nrow(expression.matrix.normalised)){
+#  x <- expression.matrix.normalised [i, ]
+#  expression.matrix.normalised [i, ] <- scale(x, min(x), max(x)-min(x))
+#}
+  
+  maxs <- apply(expression.matrix.normalised, 2, max)    
+  mins <- apply(expression.matrix.normalised , 2, min)
+  scale(expression.matrix.normalised , center = mins, scale = maxs - mins) # change the center to mins or maxs
+  
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#008B8B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_Min_Max(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+## normalize between arrays
+
+```{r, echo=FALSE}
+
+DE_edgeR_arrays= function(expression.matrix, metadata,design){
+  
+  # quantile normalise
+  expression.matrix.normalised <- limma::normalizeBetweenArrays(expression.matrix, method=NULL, targets=NULL, cyclic.method="fast")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#000080")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_arrays(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+## No normalization
+
+
+
+```{r, echo=FALSE}
+
+DE_edgeR_NN= function(expression.matrix, metadata,design){
+  
+  # Not normalized
+  expression.matrix.normalised <- expression.matrix
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#EE9572")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_NN(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+## RPM normalization
+
+
+```{r, echo=FALSE}
+
+DE_edgeR_RPM= function(expression.matrix, metadata,design){
+  
+  # RPM normalise
+  expression.matrix.normalised <- ADImpute::NormalizeRPM(expression.matrix, sce = NULL, log = FALSE, scale = 1,
+pseudo.count = 1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#87CEFA", "#8B7E66")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_RPM(expression.matrix,metadata,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+```
+
+
+## Total Count normalization
+
+```{r, echo=FALSE}
+norm.TC <- function(expression.matrix, groups,design) {
+  
+  dat.DGE <- DGEList(counts = matrix(expression.matrix, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix))
+  scaling.factor <- dat.DGE$samples$lib.size/1e6
+  dat.normed <- t(t(expression.matrix)/scaling.factor)
+ 
+  # TC normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#458B74")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.TC(expression.matrix,groups,design)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+```
+
+
+# PoissonSeq normalization
+
+```{r, echo=FALSE}
+norm.PoissonSeq <- function(expression.matrix) {
+  
+  invisible(capture.output(scaling.factor <- PoissonSeq::PS.Est.Depth(expression.matrix)))
+  dat.normed <- t(t(expression.matrix)/scaling.factor)
+
+  # PoissonSeq normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "darkslategray")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.PoissonSeq(expression.matrix)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+```
+
+
+## Normalization By Remove Unwanted Variation Using Control Genes (RUVg)
+ test.RUVg <- norm.RUV(data.test, data.group)
+
+```{r, echo=FALSE}
+
+norm.RUVg <- function(expression.matrix, groups,design) {
+  
+  filter <- apply(expression.matrix, 1, function(x) length(x[x > 5]) >= 1)
+  dat.ruv <- expression.matrix[filter, ]
+  genes <- rownames(dat.ruv)
+  condition <- factor(groups)
+  set <- newSeqExpressionSet(as.matrix(dat.ruv),
+                             phenoData = data.frame(condition,
+                                                    row.names = colnames(dat.ruv)))
+  design1 <- model.matrix(~ condition, data = data.frame(condition,
+                                                        row.names = colnames(dat.ruv)))
+  y <- DGEList(counts = DESeq2::counts(set), group = condition)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design1)
+  y <- estimateGLMTagwiseDisp(y, design1)
+  fit <- glmFit(y, design1)
+  lrt <- glmLRT(fit, coef = 2)
+  top <- topTags(lrt, n = nrow(set))$table
+  spikes <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:(0.15*nrow(expression.matrix))]))]
+
+
+  t <- RUVg(set, spikes, k = 1)
+  dat.normed <- normCounts(t)
+  
+  
+  # RUVg normalise
+  expression.matrix.normalised <- round(dat.normed)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "darkorange3")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.RUVg(expression.matrix,groups,design)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+  
+```
+
+
+## Normalization By Remove Unwanted Variation Using Replicate Samples (RUVs)
+test.RUVs <- norm.RUVs(data.test, data.group)
+
+```{r, echo=FALSE}
+
+norm.RUVs <- function(expression.matrix,groups,design) {
+  
+  filter <- apply(expression.matrix, 1, function(x) length(x[x > 5]) >= 1)
+  dat.ruv <- expression.matrix[filter, ]
+  genes <- rownames(dat.ruv)
+  condition <- factor(groups)
+  set <- newSeqExpressionSet(as.matrix(dat.ruv),
+                             phenoData = data.frame(condition,
+                                                    row.names = colnames(dat.ruv)))
+  design1 <- model.matrix(~ condition, data = data.frame(condition,
+                                                        row.names = colnames(dat.ruv)))
+  y <- DGEList(counts = DESeq2::counts(set), group = condition)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design1)
+  y <- estimateGLMTagwiseDisp(y, design1)
+  fit <- glmFit(y, design1)
+  lrt <- glmLRT(fit, coef = 2)
+  top <- topTags(lrt, n = nrow(set))$table
+  spikes <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:(0.15*nrow(expression.matrix))]))]
+
+  differences <- makeGroups(condition)
+  controls <- rownames(dat.ruv)
+  t <- RUVs(set, controls, k = 1, differences)
+  dat.normed <- normCounts(t)
+
+  
+  
+  # RUVs normalise
+  expression.matrix.normalised <- round(dat.normed)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "darkolivegreen4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.RUVs(expression.matrix,groups,design)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+  
+```
+
+
+## Normalization By Remove Unwanted Variation Using Residuals (RUVr)
+test.RUVr <- norm.RUVr(data.test, data.group)
+
+
+```{r, echo=FALSE}
+norm.RUVr <- function(expression.matrix, groups,design) {
+
+  
+  filter <- apply(expression.matrix, 1, function(x) length(x[x > 5]) >= 1)
+  dat.ruv <- expression.matrix[filter, ]
+  genes <- rownames(dat.ruv)
+  condition <- factor(groups)
+  set <- newSeqExpressionSet(as.matrix(dat.ruv),
+                             phenoData = data.frame(condition,
+                                                    row.names = colnames(dat.ruv)))
+  design1 <- model.matrix(~ condition, data = data.frame(condition,
+                                                        row.names = colnames(dat.ruv)))
+  y <- DGEList(counts = DESeq2::counts(set), group = condition)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design1)
+  y <- estimateGLMTagwiseDisp(y, design1)
+  fit <- glmFit(y, design1)
+  lrt <- glmLRT(fit, coef = 2)
+  top <- topTags(lrt, n = nrow(set))$table
+  spikes <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:(0.15*nrow(expression.matrix))]))]
+
+  design2 <- model.matrix(~ condition, data = pData(set))
+  y <- DGEList(counts = DESeq2::counts(set), group = condition)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design2)
+  y <- estimateGLMTagwiseDisp(y, design2)
+  fit <- glmFit(y, design2)
+  res <- residuals(fit, type = "deviance")
+  setUQ <- betweenLaneNormalization(set, which = "upper")
+  controls <- rownames(dat.ruv)
+  t <- RUVr(setUQ, controls, k = 1, res)
+  dat.normed <- normCounts(t)
+  
+  
+  
+  # RUVr normalise
+  expression.matrix.normalised <- round(dat.normed)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "#CD4F39")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.RUVr(expression.matrix,groups,design)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+```
+
+
+
