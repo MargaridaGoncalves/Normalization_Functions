@@ -1,3 +1,5 @@
 noisyR information:
 
 These Datasets contain RNA sequencing data
+
+To open the HTML file use this link: https://htmlpreview.github.io/?https://github.com/MargaridaGoncalves/Normalization_Functions/blob/main/NormalizationFunctions.html
