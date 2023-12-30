@@ -1,0 +1,2032 @@
+---
+title: "Dataset 4"
+output: html_notebook
+---
+
+
+```{r}
+# Clear variables
+rm(list=ls())
+#Get path
+path<-getwd(); path
+# Set path
+setwd(path)
+```
+
+```{r}
+library(utils)
+library(grDevices)
+library(tibble)
+library(magrittr)
+library(philentropy)
+library(doParallel)
+library(foreach)
+
+library(BiocGenerics)
+library(BiocManager)
+library(edgeR)
+library(DESeq2)
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(readxl)
+library(foreign)
+library(GO.db)
+library(preprocessCore)
+library(writexl)
+library(openxlsx)
+library(vsn)
+library(pheatmap)
+library(RColorBrewer)
+library(clustifyr)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(org.Rn.eg.db)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(ggplot2)
+library(DEGreport)
+library(vidger)
+library(SummarizedExperiment)
+library(Biobase)
+library(GenomicRanges)
+
+library(enrichplot)
+library(GOSemSim)
+```
+
+
+
+
+
+```{r}
+counts.in <- system.file("extdata", "counts_raw.csv", package = "noisyr")
+df <- read.csv(counts.in, row.names = 1)
+str(df)
+head(df)
+```
+
+```{r}
+expression.matrix <- noisyr::cast_matrix_to_numeric(df)
+```
+
+```{r}
+expression.matrix.denoised.standard <- noisyr::noisyr(
+  approach.for.similarity.calculation = "counts", 
+  expression.matrix = df
+)
+```
+
+
+The output of the noise removal is a denoised matrix that can be passed on to other methods for downstream analysis:
+
+```{r}
+head(expression.matrix.denoised.standard)
+
+apply(expression.matrix.denoised.standard, 2, min)
+
+```
+##Similarity
+We can then run the similarity calculation using calculate_expression_similarity_counts():
+
+```{r}
+expression.summary <- noisyr::calculate_expression_similarity_counts(
+  expression.matrix = expression.matrix, 
+  similarity.measure = "correlation_pearson"
+)
+str(expression.summary)
+```
+
+Users can select a similarity measure to assess the localised consistency in expression across samples (dissimilarity measures are inverted):
+
+```{r}
+noisyr::get_methods_correlation_distance()
+
+```
+
+```{r}
+noisyr::optimise_window_length(
+  expression.matrix = expression.matrix,
+  similarity.measure = "correlation_pearson"
+)
+```
+
+Window length optimisation can be turned on using the optimise.window.length.logical parameter in noisyr() or noisyr_counts().
+
+Plots of the abundance-correlation relation can be generated through the plot_expression_similarity() function:
+
+```{r}
+plotlist <- noisyr::plot_expression_similarity(
+  expression.summary = expression.summary)
+plotlist[[1]]
+```
+
+
+As expected, we observe low correlation values for low abundances and a steady increase towards 1 as the abundance increases. This is based on the expectation that most genes are not differentially expressed and have consistent expression, but at low abundances the stochastic nature of transcription and sequencing gives rise to noise. The local maximum at very low abundances is due to strings of zeros driving the correlation higher than expected.
+
+```{r}
+plotdf.line <- tibble::tibble()
+for(i in 1:4){
+  lineid <- i * 2 - 1
+  plotdf.line <- rbind(
+    plotdf.line, 
+    dplyr::mutate(plotlist[[lineid]]$data,
+                  Sample=colnames(expression.matrix)[i]))
+}
+
+ggplot2::ggplot(plotdf.line) +
+    ggplot2::theme_minimal() + 
+    ggplot2::geom_line(ggplot2::aes(x=x, y=y, colour=Sample)) +
+    ggplot2::geom_smooth(ggplot2::aes(x,y,colour=Sample), method="loess",
+                         formula= y ~ x, span=0.1) +
+    ggplot2::ylim(0:1) +
+    ggplot2::xlab("log2(expression)") +
+    ggplot2::ylab("Pearson correlation") +
+    ggplot2::geom_hline(yintercept=0.25, color="black")
+```
+
+
+##Noise quantification
+
+Using the output of the similarity calculation, we can compute the signal to noise threshold in each sample:
+
+```{r}
+noise.thresholds <- noisyr::calculate_noise_threshold(expression = expression.summary)
+noise.thresholds
+```
+Here we used the default parameters: a similarity threshold of 0.25 and the Boxplot-IQR method. There are several methods available, which can be viewed with the get_methods_calculate_noise_threshold() function:
+
+```{r}
+noisyr::get_methods_calculate_noise_threshold()
+```
+The first three methods are just calculating the minimum of the density plot for all genes (a common, fast approach). This usually provides a rough, overestimated signal to noise threshold.
+
+The rest of the methods use either the (smoothed) line plot or the boxplot to find the noise threshold given a similarity (correlation/distance) threshold.
+
+It is recommended that the method with the least coefficient of variation across all samples is chosen for noise removal. This can also be applied to compute the correlation/distance threshold instead of supplying it manually, which is especially useful for non-correlation measures which don’t have a standard range.
+
+For example, by looking to minimise the coefficient of variation, we get a correlation threshold of 0.21 and the loess10 smoothing method for this dataset (by default all methods from get_methods_calculate_noise_threshold() are used:
+
+```{r}
+similarity.threshold.sequence <- seq(0.2, 0.3, by=0.01)
+stats.table <- noisyr::calculate_noise_threshold_method_statistics(
+  expression = expression.summary,
+  similarity.threshold.sequence = similarity.threshold.sequence
+)
+row.min.coef.var <- which.min(stats.table$noise.threshold.coefficient.of.variation)
+# adjust column names for printing
+colnames(stats.table) <- c("approach", "method", "corr.thr", "min", "mean", "coef.var", "max", "all")
+stats.table[row.min.coef.var, 1:7]
+
+dplyr::filter(stats.table, round(corr.thr, 2) == 0.21)[, 1:7]
+
+dplyr::filter(stats.table, method == "loess10_smoothing")[, 1:7]
+
+```
+We can then call calculate_noise_threshold() with our optimised parameters:
+
+```{r}
+noise.thresholds <- noisyr::calculate_noise_threshold(
+  expression = expression.summary,
+  similarity.threshold = 0.21,
+  method.chosen = "Line_plot-loess10_smoothing"
+)
+
+noise.thresholds
+```
+
+Parameter optimisation can be turned on by specifying vectors of values for similarity.threshold and/or method.chosen (a subset of get_methods_calculate_noise_threshold()) when calling noisyr() or noisyr_counts().
+
+## Noise removal
+
+To produce the denoised count matrix, the function remove_noise_from_matrix() is used with a specified vector of noise thresholds (usually calculated by calculate_noise_threshold()).
+
+
+```{r}
+expression.matrix.denoised <- noisyr::remove_noise_from_matrix(
+  expression.matrix = expression.matrix,
+  noise.thresholds = noise.thresholds)
+
+str(expression.matrix.denoised)
+```
+The behaviour of remove_noise_from_matrix() can be further modified:
+
+1) add.threshold whether to add the noise threshold to each entry (default) or set each entry under the noise threshold to the noise threshold.
+
+2) average.threshold whether the noise thresholds for the different samples are averaged (default) or used individually. The latter should be especially avoided if the thresholds have high variance, as it could intoduce artificial differences in the data.
+
+3) remove.noisy.features whether genes/features whose expression is under the noise threshold in every sample should be removed from the matrix (default) or not
+
+Because of these defaults, passing the mean of the thresholds gives a slightly different result (different # of genes fully under the noise threshold:
+
+```{r}
+expression.matrix.denoised.fixed <- noisyr::remove_noise_from_matrix(
+  expression.matrix = expression.matrix, 
+  noise.thresholds = mean(noise.thresholds))
+```
+
+```{r}
+nrow(expression.matrix.denoised); nrow(expression.matrix.denoised.fixed)
+```
+By supplying the corresponding parameters to noisyr(), we obtain the same final result from the full pipeline:
+
+```{r}
+expression.matrix.denoised.full.pipeline <- noisyr::noisyr(
+  approach.for.similarity.calculation = "counts", 
+  expression.matrix = expression.matrix,
+  similarity.measure = "correlation_pearson",
+  optimise.window.length.logical = FALSE,
+  similarity.threshold = seq(0.2, 0.3, by=0.01),
+  method.chosen = "Line_plot-loess10_smoothing"
+)
+
+identical(expression.matrix.denoised,
+          expression.matrix.denoised.full.pipeline)
+```
+## Downstream analysis
+
+Downstream analysis means an engineering analysis to identify any negative impacts post-project runoff on properties and drainage systems downstream of a development site, and identification of measures that will be implemented to mitigate or prevent identified impacts.
+
+What is downstream analysis in genomics?
+Downstream analysis comprises all operations on the pre-processed data, whether it be a simple descriptive analysis, hypothesis testing, clustering or prediction. Many preprocessing techniques are relevant for both clinical and tumor genetics, whereas downstream analysis is more specific.
+
+
+The denoised matrix can be used instead of the raw count matrix for downstream analysis. Here we present a simple example of a differential expression (DE) analysis and compare the two.
+
+We create a function to perform the same DE pipeline on both matrices, using the edgeR package.
+
+  # create metadata
+  
+```{r}
+  metadata <- data.frame(id = colnames(expression.matrix),
+                         timepoint = c("0h", "0h", "12h", "12h"))
+```
+
+
+## Quantile normalization
+
+```{r}
+DE_edgeR = function(expression.matrix, metadata){
+
+  
+  # quantile normalise
+  expression.matrix.normalised <-
+    preprocessCore::normalize.quantiles(expression.matrix)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  edger.fit <- glmFit(edger, design)
+  edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("black", "red")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res)
+  
+}
+
+results.raw <- DE_edgeR(expression.matrix,metadata)
+results.denoised <- DE_edgeR(expression.matrix.denoised,metadata)
+
+
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+
+We observe the distribution of genes in the volcano plots becoming a lot tighter for the denoised matrix. For the raw matrix, there are a lot of genes with low p-values and high log-fold changes that are barely called DE. Those “whiskers” are corrected for the denoised matrix.
+
+
+We can also see the number of differentially expressed genes has been reduced.
+
+
+
+## Quantile Normalization with limma
+
+```{r}
+DE_edgeR_Quantile_limma = function(expression.matrix.denoised, metadata){
+  
+  # quantile normalise
+  expression.matrix.normalised <-
+    limma::normalizeQuantiles(expression.matrix.denoised, ties = TRUE)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#F0FFF0", "#FF8C00")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 10))
+  )
+  
+  return(res)
+}
+
+results.denoised <- DE_edgeR_Quantile_limma(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+  
+```
+
+Quantile normalization Manual
+
+```{r}
+norm.QN <- function(expression.matrix.denoised, filter = FALSE) {
+
+  if (filter == TRUE) {
+    expression.matrix.denoised <- log2(expression.matrix.denoised + 1)
+    expression.matrix.denoised <- expression.matrix.denoised[rowMeans(expression.matrix.denoised) > 2, ]
+  } else {
+    expression.matrix.denoised <- log2(expression.matrix.denoised + 1)
+  }
+  dat.log.normed <- preprocessCore::normalize.quantiles(as.matrix(expression.matrix.denoised))
+  dat.normed <- 2^dat.log.normed - 1
+  colnames(dat.normed) <- colnames(expression.matrix.denoised)
+  rownames(dat.normed) <- rownames(expression.matrix.denoised)
+
+# process using edgeR
+  expression.matrix.for.de <- round(dat.normed)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#EEE8CD", "#EE3B3B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 10))
+  )
+  
+  return(res)
+}
+
+results.denoised <- norm.QN(expression.matrix.denoised)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+
+
+## Robust Quantile normalization
+
+```{r}
+DE_edgeR_Robust_Quantile = function(expression.matrix.denoised, metadata){
+  
+  # robust quantile normalise
+  expression.matrix.normalised <-
+    preprocessCore::normalize.quantiles.robust(expression.matrix.denoised)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res <- topTags(edger.lrt, n = Inf)$table
+  res$DE <- res$FDR < 0.05 & abs(res$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("navyblue", "slateblue1")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 10))
+  )
+  
+  return(res)
+  
+}
+
+
+results.denoised <- DE_edgeR_Robust_Quantile(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+## loess normalization
+
+
+
+```{r}
+DE_edgeR_loess = function(expression.matrix.denoised, metadata){
+  
+  # quantile normalise
+  expression.matrix.normalised <- affy::normalize.loess(expression.matrix.denoised, epsilon = 10^-2)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "palevioletred4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 10))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_loess(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+##  cyclic loess normalization
+# This normalization can give a matrix with negative values
+
+```{r}
+DE_edgeR_cyclic_loess = function(expression.matrix, metadata){
+
+  
+  # cyclic loess normalise
+  expression.matrix.normalised <- limma::normalizeCyclicLoess(expression.matrix, weights = NULL, span=0.1, iterations = 5, method = "pairs") #Options are "fast", "affy" or "pairs"
+
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # apply a filter: Normaly the cyclic normalization gives negative values (negative expression is the same as no expression)
+  expression.matrix.normalised <- pmax(expression.matrix.normalised,0) # converts negative in zero
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "palevioletred4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 120))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_cyclic_loess(expression.matrix.denoised,metadata)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+png(filename="GOannotation.png", width=950, height=600)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+dev.off()
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+
+
+
+## Median Normalization
+
+
+```{r}
+DE_edgeR_median = function(expression.matrix.denoised, metadata){
+  
+  # apply a filter
+  
+  keep = rowSums(expression.matrix.denoised) >= 10
+  expression.matrix.denoised1<- expression.matrix.denoised[keep,]
+
+
+  # median normalise
+  expression.matrix.normalised <- limma::normalizeMedianValues(expression.matrix.denoised1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised1)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised1)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("mintcream", "hotpink4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_median(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+Método Manual
+## Define the groups to study in the design (groups)
+```{r}
+# = metadata$timepoint
+groups = c(metadata[,2])
+```
+
+```{r}
+norm.med <- function(expression.matrix.denoised, metadata) {
+  # it could be (expression.matrix.denoised, groups) { and then in ncol = length(groups) given that groups = metadata$timepoint
+  # Both ways can be done
+  #it is preferred to call the groups instead of metadata as we want to have the function optimized
+  
+  dat.DGE <- DGEList(counts = matrix(expression.matrix.denoised, ncol = length(metadata$timepoint)),
+                     group = factor(metadata$timepoint),
+                     genes = rownames(expression.matrix.denoised))
+  m.factor <- apply(dat.DGE$counts, 2, function(x) median(x[x != 0]))
+  scaling.factor <- m.factor/1e6
+  dat.normed <- t(t(expression.matrix.denoised)/scaling.factor)
+  
+  
+  # median normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("mintcream", "hotpink4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- norm.med(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+  
+```
+
+
+
+## Median absolute Normalization
+
+
+```{r}
+DE_edgeR_median_abs = function(expression.matrix.denoised, metadata){
+  
+  # apply a filter
+  
+  keep = rowSums(expression.matrix.denoised) >= 10
+  expression.matrix.denoised1<- expression.matrix.denoised[keep,]
+
+
+  # median normalise
+  expression.matrix.normalised <- limma::normalizeMedianAbsValues(expression.matrix.denoised1)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised1)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised1)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("snow3", "springgreen4")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_median_abs(expression.matrix.denoised,metadata)
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+
+
+
+
+
+## TMM 
+
+```{r}
+DE_edgeR_TMM = function(expression.matrix.denoised, metadata){
+
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix.denoised*edgeR::normLibSizes(expression.matrix.denoised) ## method = "TMM"
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "hotpink3")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0,30))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_TMM(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+Método Manual:
+
+```{r}
+norm.TMM <- function(expression.matrix.denoised, groups) {
+
+  dat.DGE <- DGEList(counts = matrix(expression.matrix.denoised, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix.denoised))
+  d <- calcNormFactors(dat.DGE, method = "TMM")
+  #dat.normed <- d$samples$norm.factors * expression.matrix.denoised 
+  dat.normed <- t(t(expression.matrix.denoised)/d$samples$norm.factors)
+  
+  
+# process using edgeR
+  expression.matrix.for.de <- round(dat.normed)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "hotpink3")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.TMM(expression.matrix.denoised,groups)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+
+
+
+
+## TMMwsp Normalization
+
+```{r}
+DE_edgeR_TMM_wsp = function(expression.matrix, metadata){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix*edgeR::normLibSizes(expression.matrix, method = "TMMwsp") 
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#CD8162")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 40))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_TMM_wsp(expression.matrix,metadata)
+
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+```
+
+
+
+## RLE Normalization
+
+
+```{r}
+DE_edgeR_RLE = function(expression.matrix.denoised, metadata){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix.denoised*edgeR::normLibSizes(expression.matrix.denoised, method = "RLE")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#87CEFA")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 75))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_RLE(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+
+
+## Upper quartile normalization
+
+```{r}
+DE_edgeR_upper_Quartile = function(expression.matrix.denoised, metadata){
+
+  # median normalise
+  expression.matrix.normalised <- expression.matrix.denoised*edgeR::normLibSizes(round(expression.matrix.denoised), method = "upperquartile")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#8B4789")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 75))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_upper_Quartile(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+Upper Quantile Manual
+
+```{r}
+norm.UQ <- function(expression.matrix.denoised, groups) {
+  
+  dat.DGE <- DGEList(counts = matrix(expression.matrix.denoised, ncol = length(groups)),
+                     group = factor(groups),
+                     genes = rownames(expression.matrix.denoised))
+  q.factor <- apply(dat.DGE$counts, 2, function(x) quantile(x[x != 0], probs = 0.75))
+  scaling.factor <- q.factor/1e6
+  dat.normed <- t(t(expression.matrix.denoised)/scaling.factor)
+  
+ 
+  # UQ normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#6959CD")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.UQ(expression.matrix.denoised,groups)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+
+
+## Min-max normalization
+
+
+```{r}
+DE_edgeR_Min_Max = function(expression.matrix.denoised, metadata){
+
+  #Normalization
+  
+  expression.matrix.normalised  <- expression.matrix.denoised
+  
+#for(i in 1:nrow(expression.matrix.normalised)){
+#  x <- expression.matrix.normalised [i, ]
+#  expression.matrix.normalised [i, ] <- scale(x, min(x), max(x)-min(x))
+#}
+  
+  maxs <- apply(expression.matrix.normalised, 2, max)    
+  mins <- apply(expression.matrix.normalised , 2, min)
+  scale(expression.matrix.normalised , center = mins, scale = maxs - mins) # change the center to mins or maxs
+  
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res1 <- topTags(edger.lrt, n = Inf)$table
+  res1$DE <- res1$FDR < 0.05 & abs(res1$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res1) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("seashell", "#008B8B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res1)
+  
+}
+
+results.denoised <- DE_edgeR_Min_Max(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+## Global linear regression normalization
+
+```{r}
+DE_edgeR_Glr = function(expression.matrix.denoised, metadata){
+  
+  # quantile normalise
+  expression.matrix.normalised <- NormalyzerDE::performGlobalRLRNormalization(expression.matrix.denoised, noLogTransform = T)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#483D8B")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_Glr(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+## normalize between arrays
+
+```{r}
+
+DE_edgeR_arrays= function(expression.matrix, metadata){
+  
+  # quantile normalise
+  expression.matrix.normalised <- limma::normalizeBetweenArrays(expression.matrix, method=NULL, targets=NULL, cyclic.method="fast")
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#000080")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 10))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_arrays(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+
+## No normalization
+
+
+
+```{r}
+
+DE_edgeR_NN= function(expression.matrix, metadata){
+  
+  # quantile normalise
+  expression.matrix.normalised <- expression.matrix
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("thistle1", "#EE9572")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- DE_edgeR_NN(expression.matrix.denoised,metadata)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+
+
+```
+
+
+
+
+## PoissonSeq normalization
+
+```{r}
+norm.PoissonSeq <- function(expression.matrix.denoised) {
+  
+  invisible(capture.output(scaling.factor <- PoissonSeq::PS.Est.Depth(expression.matrix.denoised)))
+  dat.normed <- t(t(expression.matrix.denoised)/scaling.factor)
+
+  # PoissonSeq normalise
+  expression.matrix.normalised <- dat.normed
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "darkslategray")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.PoissonSeq(expression.matrix.denoised)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+```
+
+## Normalization By Surrogate Variable Analysis for Sequencing Data (SVA)
+Presents negative counts 
+
+```{r}
+# test.SVA <- norm.SVA(data.test, data.group)
+norm.SVA <- function(expression.matrix.denoised, groups) {
+  
+  filter <- apply(expression.matrix.denoised, 1, function(x) length(x[x > 5]) >= 2)
+  dat.sva <- expression.matrix.denoised[filter, ]
+  genes <- rownames(dat.sva)
+  mod1 <- model.matrix(~ groups)
+  mod0 <- cbind(mod1[,1])
+  dat0 <- as.matrix(dat.sva)
+#  svseq <- svaseq(dat0, mod1, mod0, n.sv = 1)$sv
+  invisible(capture.output(svseq <- sva::svaseq(dat0, mod1, mod0, n.sv = 1)$sv))
+  adjust <- cbind(mod1, svseq)
+  hat <- solve(t(adjust) %*% adjust) %*% t(adjust)
+  beta <- (hat %*% t(expression.matrix.denoised))
+  P <- ncol(mod1)
+  dat.normed <- expression.matrix.denoised - t(as.matrix(adjust[,-c(1:P)]) %*% beta[-c(1:P),])
+  
+# SVA normalise
+  expression.matrix.normalised <- round(dat.normed)
+  rownames(expression.matrix.normalised) <- base::rownames(expression.matrix.denoised)
+  colnames(expression.matrix.normalised) <- base::colnames(expression.matrix.denoised)
+  
+    # apply a filter: Normaly the cyclic normalization gives negative values (negative expression is the same as no expression)
+  expression.matrix.normalised <- pmax(expression.matrix.normalised,0) # converts negative in zero
+  
+  # process using edgeR
+  expression.matrix.for.de <- round(expression.matrix.normalised)
+  expression.matrix.for.de <- 
+    expression.matrix.for.de[apply(expression.matrix.for.de, 1, sum) > 0, ]
+  design <- model.matrix(~ 0 + metadata$timepoint)
+  edger <- DGEList(counts = expression.matrix.for.de)
+  edger <- estimateDisp(edger, design)
+  #edger.fit <- glmFit(edger, design)
+  #edger.lrt <- glmLRT(edger.fit, contrast=c(-1, 1))
+  edger.fit <- glmQLFit(edger, design)
+  edger.lrt <- glmQLFTest(edger.fit, contrast=c(-1, 1))
+  
+  # extract results
+  res2 <- topTags(edger.lrt, n = Inf)$table
+  res2$DE <- res2$FDR < 0.05 & abs(res2$logFC) > 1
+  
+  # make volcano plot
+  print(
+    ggplot2::ggplot(res2) + 
+      ggplot2::theme_minimal() +
+      ggplot2::geom_point(ggplot2::aes(x=logFC, 
+                                       y=-log10(FDR), 
+                                       colour=DE), 
+                          show.legend=FALSE) +
+      ggplot2::scale_color_manual(values=c("#C1CDCD", "darkslategray")) +
+      ggplot2::lims(x=c(-12, 12), y=c(0, 30))
+  )
+  
+  return(res2)
+  
+}
+
+results.denoised <- norm.SVA(expression.matrix.denoised,groups)
+
+
+length(results.denoised$DE[results.denoised$DE == "TRUE"])
+length(results.denoised$DE[results.denoised$DE == "FALSE"])
+
+
+results.denoised
+
+
+filtering <- results.denoised[results.denoised$DE == "TRUE",]
+filtering
+
+genes_to_test <- rownames(filtering)
+genes_to_test
+
+genes_to_test <- gsub("\\..*","",genes_to_test)
+genes_to_test
+
+Go_results <- enrichGO(gene = genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL", ont = "BP")
+
+as.data.frame(Go_results)
+
+fit <- plot(barplot(Go_results,showCategory = 20))
+
+goplot(Go_results)
+
+dotplot(Go_results)
+
+# You can also create an enrichment map that connects GO terms with edges between overlapping gene sets. This makes it easier to identify functional modules:
+
+ora_analysis_bp <- pairwise_termsim(Go_results, method = "JC")
+emapplot(ora_analysis_bp, color = "qvalue")
+```
